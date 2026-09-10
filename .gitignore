@@ -1,10 +1,18 @@
-outputs/
-outputs_xpu/
-outputs_cpu/
+# Build artifacts
+build/
+*.o
+*.d
+
+# Model and output files
+*.pt
+*.csv
+
+# Python
 __pycache__/
 *.pyc
 .venv/
-*.png
-*.pt
-*.csv
+
+# IDE / OS
+.vscode/
+.idea/
 .DS_Store
