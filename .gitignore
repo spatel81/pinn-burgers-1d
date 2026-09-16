@@ -7,6 +7,10 @@ build/
 *.pt
 *.csv
 
+# ...except the committed reference results in docs/, which are the
+# verified Aurora run shown in the README, not per-run output.
+!docs/*.csv
+
 # Python
 __pycache__/
 *.pyc

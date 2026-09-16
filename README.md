@@ -20,6 +20,55 @@ u(−1, t) = u(1, t) = 0             boundary conditions
 ν = 0.01/π ≈ 0.00318               viscosity
 ```
 
+## Result
+
+Verified on Aurora (Intel Data Center GPU Max, `--device xpu`) with
+15,000 Adam epochs plus L-BFGS fine-tuning:
+
+![PINN prediction versus the finite-difference reference solution at t = 0, 0.25, 0.5, 0.75 and 1.0. The two curves are visually indistinguishable at every slice.](docs/pinn_vs_reference.png)
+
+**L2 relative error = 1.550 × 10⁻³** — inside the 10⁻³–10⁻² band Raissi
+et al. report for this benchmark.  The dashed red curve is what LibTorch
+computed in C++, not the Python model, so this figure exercises the
+whole chain: training → `torch.jit.trace` → `torch::jit::load` →
+forward pass.
+
+Note the slices from t = 0.5 onward.  The smooth −sin(πx) profile
+steepens into a near-discontinuity at x = 0 as the convection term
+outruns the weak viscosity, and the network resolves that front without
+the spurious oscillations a naive finite-difference scheme produces
+there.  That front is also where the error concentrates — per-slice
+figures from [docs/validation_errors.csv](docs/validation_errors.csv):
+
+| t | L2 relative | max absolute |
+|---|---|---|
+| 0.00 | 1.40 × 10⁻³ | 2.27 × 10⁻³ |
+| 0.25 | 1.04 × 10⁻³ | 2.65 × 10⁻³ |
+| 0.50 | 2.05 × 10⁻³ | 1.53 × 10⁻² |
+| 0.75 | 1.82 × 10⁻³ | 1.06 × 10⁻² |
+| 1.00 | 1.34 × 10⁻³ | 5.07 × 10⁻³ |
+
+The L2 error barely moves across time, but the max absolute error jumps
+an order of magnitude at t = 0.5 — the network is accurate everywhere
+except in the handful of points spanning the front, which is the
+expected failure mode for this benchmark.
+
+### Training
+
+![Training loss on a log scale. Adam descends from about 7e-1 to 1.2e-4 over 15,000 epochs with periodic spikes, then L-BFGS drops the total loss to about 8e-6.](docs/training_loss.png)
+
+Adam brings the total loss to ~1.2 × 10⁻⁴ over 15,000 epochs; L-BFGS
+fine-tuning then buys another factor of ~15, ending near 8 × 10⁻⁶.  The
+periodic spikes during Adam are ordinary for PINNs — the optimizer
+crossing a sharp ridge in the loss landscape, then recovering.  The
+boundary-condition term (green) is satisfied most easily; the PDE
+residual (blue) dominates the total throughout, which is why L-BFGS,
+which attacks it directly, pays off.
+
+Both figures are produced by the pipeline itself — reproduce them with
+the single command in [Usage](#usage) below, written to
+`build/output/`.  The copies here are from the verified Aurora run.
+
 ## How it works
 
 ```
@@ -186,9 +235,15 @@ Radau implicit solver — then interpolates it onto the same points the
 C++ binary evaluated and reports:
 
 ```
-  L2 relative error:  1.234567e-03
+  L2 relative error:  1.550241e-03
   (Raissi et al. report ~1e-3 to 1e-2 for this setup)
 ```
+
+`pinn_vs_reference.png` and `training_loss.png` are the figures shown in
+[Result](#result) above; `validation_errors.csv` breaks the comparison
+down per time slice.  The verified Aurora copies of all three are kept
+in [docs/](docs/) for reference — a fresh run writes its own into the
+output directory.
 
 You can re-run validation on its own against an existing CSV:
 
@@ -205,6 +260,10 @@ pinn-burgers-1d/          (cpp branch)
 ├── LICENSE                 MIT license
 ├── requirements.txt        Python dependencies
 ├── .gitignore
+├── docs/                   Verified Aurora run (the figures above)
+│   ├── pinn_vs_reference.png
+│   ├── training_loss.png
+│   └── validation_errors.csv
 ├── src/
 │   └── main.cpp            C++ driver: train → load → infer → validate
 ├── export/
