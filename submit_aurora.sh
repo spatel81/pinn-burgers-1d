@@ -7,6 +7,12 @@
 #   1. Builds the C++ inference binary (CMake + make)
 #   2. Trains the PINN and exports a TorchScript model (via Python)
 #   3. Loads the model in C++ and runs inference on a (x, t) grid
+#   4. Validates that output against a reference solution and plots it
+#
+# Step 4 needs scipy and matplotlib, which the frameworks module does
+# not provide.  Install them once with:
+#     pip install --user matplotlib scipy
+# Without them the job still completes — Step 4 warns and is skipped.
 #
 # Submit with:    qsub submit_aurora.sh
 # Check status:   qstat -u $USER
@@ -57,13 +63,18 @@ if [ ! -f build/pinn_inference ]; then
     exit 1
 fi
 
-# ── Run (train + infer, all in one shot) ─────────────────────────────
+# ── Run (train + infer + validate, all in one shot) ──────────────────
 echo ""
 echo ">>> Running pinn_inference on XPU..."
 ./build/pinn_inference \
     --device xpu \
     --output-dir build/output \
     --epochs 15000
+
+# ── Results ──────────────────────────────────────────────────────────
+echo ""
+echo ">>> Outputs in ${PBS_O_WORKDIR}/build/output:"
+ls -1 build/output 2>/dev/null || echo "    (none — check the log above)"
 
 echo ""
 echo ">>> Job complete: $(date) <<<"

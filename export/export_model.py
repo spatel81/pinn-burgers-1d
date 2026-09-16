@@ -13,9 +13,14 @@ This script is the Python half of the C++ inference pipeline:
     [2] C++ (pinn_inference):  load .pt → inference on (x, t) grid
 
 The PINN architecture, training procedure, and physics are identical
-to the original pinn_burgers.py on the main branch.  Validation,
-plotting, and the reference solution are omitted — this script's
-sole job is to produce a portable TorchScript model file.
+to the original pinn_burgers.py on the main branch.  This script's job
+is to produce a portable TorchScript model file, plus a CSV log of the
+training loss history.
+
+Validation against the reference solution and all plotting live in the
+sibling script validate_and_plot.py, which runs after C++ inference and
+checks what LibTorch actually computed.  The training log written here
+(training_log.csv) is what that script plots as training_loss.png.
 
 Solves:
     ∂u/∂t + u·∂u/∂x = ν·∂²u/∂x²      x ∈ [−1, 1],  t ∈ [0, 1]
@@ -29,6 +34,7 @@ Usage:
 """
 
 import argparse
+import csv
 import os
 import time
 
@@ -464,6 +470,56 @@ def train_lbfgs(model, data, nu):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# TRAINING LOG
+# ═══════════════════════════════════════════════════════════════════════
+
+def save_training_log(adam_history, lbfgs_history, output_dir):
+    """Write the loss history to a CSV file.
+
+    Columns: phase, step, total, pde, ic, bc.
+    One row per epoch (Adam) or per function evaluation (L-BFGS).
+
+    This file is the input to the training_loss.png plot produced by
+    validate_and_plot.py.
+
+    Parameters
+    ----------
+    adam_history  : list of dict
+    lbfgs_history : list of dict or None
+    output_dir    : str
+
+    Returns
+    -------
+    str
+        Path to the saved CSV file.
+    """
+    log_path = os.path.join(output_dir, "training_log.csv")
+    with open(log_path, "w", newline="") as f:
+        writer = csv.DictWriter(
+            f, fieldnames=["phase", "step", "total", "pde", "ic", "bc"]
+        )
+        writer.writeheader()
+
+        for r in adam_history:
+            writer.writerow({
+                "phase": "adam",  "step": r["epoch"],
+                "total": r["total"], "pde": r["pde"],
+                "ic": r["ic"], "bc": r["bc"],
+            })
+
+        if lbfgs_history:
+            for r in lbfgs_history:
+                writer.writerow({
+                    "phase": "lbfgs", "step": r["step"],
+                    "total": r["total"], "pde": r["pde"],
+                    "ic": r["ic"], "bc": r["bc"],
+                })
+
+    print(f"  Training log saved: {log_path}")
+    return log_path
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # TORCHSCRIPT EXPORT
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -543,13 +599,19 @@ def main():
     print(f"  BC pts:          {N_BC}")
 
     # ── Phase 1: Adam ────────────────────────────────────────────────
-    train_adam(model, data, NU, args.epochs, LEARNING_RATE, LOG_EVERY)
+    adam_history = train_adam(
+        model, data, NU, args.epochs, LEARNING_RATE, LOG_EVERY
+    )
 
     # ── Phase 2: L-BFGS (optional) ──────────────────────────────────
+    lbfgs_history = None
     if not args.no_lbfgs:
-        train_lbfgs(model, data, NU)
+        lbfgs_history = train_lbfgs(model, data, NU)
     else:
         print(f"\n  L-BFGS skipped (--no-lbfgs flag).")
+
+    # ── Save training log ────────────────────────────────────────────
+    log_path = save_training_log(adam_history, lbfgs_history, args.output_dir)
 
     # ── Export TorchScript ───────────────────────────────────────────
     print(f"\n{'='*65}")
@@ -564,6 +626,7 @@ def main():
     print(f"{'='*65}")
     print(f"  Total wall-clock:     {t_total_elapsed:.1f}s")
     print(f"  TorchScript model:    {output_path}")
+    print(f"  Training log:         {log_path}")
     print(f"  Ready for C++ inference via LibTorch.")
     print()
 

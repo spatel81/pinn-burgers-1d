@@ -1,0 +1,17 @@
+# Python dependencies for the PINN Burgers' C++ inference pipeline
+#
+# Two scripts use these:
+#   export/export_model.py       torch, numpy
+#   export/validate_and_plot.py  numpy, scipy, matplotlib
+#
+# On Aurora, `module load frameworks` provides torch and numpy.
+# You only need:  pip install --user matplotlib scipy
+#
+# LibTorch (the C++ half) is not a pip package — it comes from the
+# frameworks module on Aurora, or from pytorch.org on a workstation.
+# See README.md.
+
+torch>=2.0
+numpy>=1.24
+matplotlib>=3.7
+scipy>=1.10

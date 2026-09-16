@@ -13,10 +13,15 @@
 //   [3] Infer (LibTorch)  →  evaluates u(x, t) on a grid and writes
 //       results to CSV.
 //
+//   [4] Validate & plot (Python)  →  calls export/validate_and_plot.py,
+//       which reads that CSV, compares it against a finite-difference
+//       reference solution, and saves the plots.
+//
 // Usage:
 //   ./pinn_inference --device xpu --output-dir build/output
 //   ./pinn_inference --skip-training --model-path model.pt --device cpu
 //   ./pinn_inference --device cpu --epochs 1000 --no-lbfgs
+//   ./pinn_inference --device cpu --no-validate
 //
 // Target platform: Aurora supercomputer (Intel PVC GPUs, icpx compiler)
 // Build: see CMakeLists.txt and README.md
@@ -28,6 +33,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -45,6 +51,7 @@ struct Config {
     int         epochs       = 15000;
     bool        no_lbfgs     = false;
     bool        skip_training = false;
+    bool        no_validate  = false;    // Skip the Python validation/plot step
     int         nx           = 256;      // Spatial grid points for inference
     int         nt           = 5;        // Time slices for inference
 };
@@ -67,6 +74,7 @@ void print_usage(const char* prog) {
         << "  --epochs <n>         Adam training epochs (default: 15000)\n"
         << "  --no-lbfgs           Skip L-BFGS fine-tuning\n"
         << "  --skip-training      Skip training, use existing model\n"
+        << "  --no-validate        Skip validation and plotting (needs scipy/matplotlib)\n"
         << "  --nx <n>             Spatial grid points for inference (default: 256)\n"
         << "  --nt <n>             Time slices for inference (default: 5)\n"
         << "  --help               Show this message\n";
@@ -93,6 +101,8 @@ Config parse_args(int argc, char* argv[]) {
             cfg.no_lbfgs = true;
         } else if (arg == "--skip-training") {
             cfg.skip_training = true;
+        } else if (arg == "--no-validate") {
+            cfg.no_validate = true;
         } else if (arg == "--nx" && i + 1 < argc) {
             cfg.nx = std::stoi(argv[++i]);
         } else if (arg == "--nt" && i + 1 < argc) {
@@ -200,6 +210,10 @@ void run_inference(torch::jit::script::Module& model,
         std::cerr << "  ERROR: Cannot open " << csv_path << " for writing\n";
         std::exit(1);
     }
+    // 8 significant digits — iostream's default of 6 would put a ~1e-6
+    // floor under any error the validation step can resolve, which is
+    // uncomfortably close to the ~1e-3 accuracy we expect from the PINN.
+    csv << std::setprecision(8);
     csv << "x,t,u_pred\n";
 
     std::cout << "\n"
@@ -252,6 +266,45 @@ void run_inference(torch::jit::script::Module& model,
     std::cout << "  Inference complete: " << elapsed_ms << " ms"
               << " (" << total_points << " points)\n"
               << "  Results saved: " << csv_path << "\n";
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// STEP 4: VALIDATE AND PLOT (via Python)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Hands the CSV we just wrote to export/validate_and_plot.py, which
+// computes a finite-difference reference solution on the same (x, t)
+// points, reports the L2 relative error, and saves the plots.
+//
+// Same system() approach as Step 1, for the same reason: scipy and
+// matplotlib have no C++ equivalent worth reimplementing here.
+//
+// Unlike Step 1, a failure is NOT fatal.  Inference has already
+// succeeded and inference_results.csv is on disk, so a missing scipy
+// or matplotlib should cost you the plots, not the run.
+
+void validate_and_plot(const Config& cfg) {
+    std::ostringstream cmd;
+    cmd << "python export/validate_and_plot.py"
+        << " --output-dir " << cfg.output_dir;
+
+    std::cout << "\n"
+              << "=================================================================\n"
+              << "  STEP 4: VALIDATION AND PLOTTING (Python)\n"
+              << "=================================================================\n"
+              << "  Command: " << cmd.str() << "\n";
+
+    int ret = std::system(cmd.str().c_str());
+    if (ret != 0) {
+        std::cerr << "\n  WARNING: Validation step failed (exit code "
+                  << ret << ").\n"
+                  << "  Inference results are still available in "
+                  << cfg.output_dir << "/inference_results.csv\n"
+                  << "  Check that scipy and matplotlib are installed "
+                  << "(see requirements.txt),\n"
+                  << "  or re-run with --no-validate to skip this step.\n";
+    }
 }
 
 
@@ -317,14 +370,28 @@ int main(int argc, char* argv[]) {
     // ── Step 3: Run inference ───────────────────────────────────────
     run_inference(model, device, cfg);
 
+    // ── Step 4: Validate and plot (unless skipped) ──────────────────
+    if (!cfg.no_validate) {
+        validate_and_plot(cfg);
+    } else {
+        std::cout << "\n  Validation skipped (--no-validate flag).\n";
+    }
+
     // ── Summary ─────────────────────────────────────────────────────
     std::cout << "\n"
               << "=================================================================\n"
               << "  DONE\n"
               << "=================================================================\n"
               << "  Model:   " << model_path << "\n"
-              << "  Output:  " << cfg.output_dir << "/inference_results.csv\n"
-              << "\n";
+              << "  Output:  " << cfg.output_dir << "/\n"
+              << "    • inference_results.csv   — u(x, t) from LibTorch\n";
+    if (!cfg.no_validate) {
+        std::cout
+            << "    • validation_errors.csv   — L2 error per time slice\n"
+            << "    • pinn_vs_reference.png   — PINN vs reference solution\n"
+            << "    • training_loss.png       — loss curves (PDE, IC, BC)\n";
+    }
+    std::cout << "\n";
 
     return 0;
 }

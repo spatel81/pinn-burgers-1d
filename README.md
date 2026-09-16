@@ -3,8 +3,9 @@
 A C++ inference pipeline for the Physics-Informed Neural Network (PINN)
 that solves the 1D viscous Burgers' equation.  A single executable
 handles the entire workflow: trains the model via Python, exports it as
-TorchScript, then loads it in C++ via LibTorch for inference — all in
-one command.
+TorchScript, loads it in C++ via LibTorch for inference, then validates
+the result against a finite-difference reference solution and plots it —
+all in one command.
 
 This is the **`cpp` branch**.  The original Python-only implementation
 lives on the [`main` branch](https://github.com/spatel81/pinn-burgers-1d/tree/main).
@@ -27,16 +28,26 @@ u(−1, t) = u(1, t) = 0             boundary conditions
   ├── [Step 1] Train & Export (Python)
   │     ├── Train PINN: Adam (15,000 epochs) + L-BFGS
   │     ├── torch.jit.trace(model, example_input)
-  │     └── Save pinn_burgers_traced.pt
+  │     ├── Save pinn_burgers_traced.pt
+  │     └── Write training_log.csv
   │
   ├── [Step 2] Load Model (LibTorch / C++)
   │     ├── torch::jit::load("pinn_burgers_traced.pt")
   │     └── model.to(device)  →  CPU or XPU
   │
-  └── [Step 3] Inference (LibTorch / C++)
-        ├── Evaluate u(x, t) on 256 × 5 grid
-        └── Write inference_results.csv
+  ├── [Step 3] Inference (LibTorch / C++)
+  │     ├── Evaluate u(x, t) on 256 × 5 grid
+  │     └── Write inference_results.csv
+  │
+  └── [Step 4] Validate & Plot (Python)
+        ├── Reference solution: method of lines + scipy Radau
+        ├── L2 relative error vs the C++ predictions
+        └── Write pinn_vs_reference.png, training_loss.png
 ```
+
+Step 4 validates what **LibTorch actually computed** — it reads the CSV
+produced in Step 3, not the Python model.  A faulty TorchScript trace or
+a mistake in the C++ grid construction shows up as a bad L2 error.
 
 ## Prerequisites
 
@@ -44,12 +55,18 @@ u(−1, t) = u(1, t) = 0             boundary conditions
 - `module load frameworks` — provides PyTorch (with XPU), LibTorch, numpy
 - `module load cmake`
 - Intel `icpx` compiler (included in the frameworks module)
+- `pip install --user matplotlib scipy` — for Step 4 (not in the module)
 
 **On a workstation:**
-- Python 3.8+ with PyTorch ≥ 2.0, numpy
+- Python 3.8+ with PyTorch ≥ 2.0, numpy, scipy, matplotlib
+  (`pip install -r requirements.txt`)
 - CMake ≥ 3.18
 - LibTorch (download from [pytorch.org](https://pytorch.org/get-started/locally/))
 - A C++17-compatible compiler (g++, clang++, or icpx)
+
+scipy and matplotlib are needed only for Step 4.  Without them the
+pipeline still trains and infers — pass `--no-validate`, or let the step
+fail with a warning, and you keep `inference_results.csv`.
 
 ## Build
 
@@ -130,14 +147,26 @@ cd /path/to/pinn-burgers-1d
 | `--epochs` | `15000` | Adam training epochs (forwarded to Python) |
 | `--no-lbfgs` | *(off)* | Skip L-BFGS fine-tuning (forwarded to Python) |
 | `--skip-training` | *(off)* | Skip training entirely, use existing model |
+| `--no-validate` | *(off)* | Skip validation and plotting (Step 4) |
 | `--nx` | `256` | Spatial grid points for inference |
 | `--nt` | `5` | Time slices for inference |
 | `--help` | | Show usage message |
 
 ## Output
 
-The inference writes `inference_results.csv` to the output directory
-with columns:
+Everything lands in the output directory (`build/output` by default):
+
+| File | Written by | Contents |
+|---|---|---|
+| `pinn_burgers_traced.pt` | Step 1 | TorchScript model |
+| `training_log.csv` | Step 1 | Per-epoch loss: `phase, step, total, pde, ic, bc` |
+| `inference_results.csv` | Step 3 | `x, t, u_pred` — the C++/LibTorch predictions |
+| `validation_errors.csv` | Step 4 | `t, l2_rel_error, max_abs_error` per slice + overall |
+| `pinn_vs_reference.png` | Step 4 | PINN vs reference at each time slice |
+| `training_loss.png` | Step 4 | Log-scale loss curves (PDE, IC, BC) |
+
+`inference_results.csv` is the core result — one row per evaluation
+point:
 
 ```csv
 x,t,u_pred
@@ -146,24 +175,42 @@ x,t,u_pred
 ...
 ```
 
-Each row is one evaluation point: `x` (spatial coordinate), `t` (time),
-`u_pred` (predicted velocity from the PINN).  With default settings,
-the file has 1,280 rows (256 x-points × 5 time slices at
+With default settings it has 1,280 rows (256 x-points × 5 time slices at
 t = 0.0, 0.25, 0.5, 0.75, 1.0).
+
+### Validation
+
+Step 4 builds a reference solution by the method of lines — central
+finite differences in x on a 1024-point grid, integrated in t by scipy's
+Radau implicit solver — then interpolates it onto the same points the
+C++ binary evaluated and reports:
+
+```
+  L2 relative error:  1.234567e-03
+  (Raissi et al. report ~1e-3 to 1e-2 for this setup)
+```
+
+You can re-run validation on its own against an existing CSV:
+
+```bash
+python export/validate_and_plot.py --output-dir build/output
+```
 
 ## Project structure
 
 ```
 pinn-burgers-1d/          (cpp branch)
-├── CMakeLists.txt         LibTorch build configuration
-├── README.md              This file
-├── LICENSE                MIT license
+├── CMakeLists.txt          LibTorch build configuration
+├── README.md               This file
+├── LICENSE                 MIT license
+├── requirements.txt        Python dependencies
 ├── .gitignore
 ├── src/
-│   └── main.cpp           C++ driver: train → load → infer
+│   └── main.cpp            C++ driver: train → load → infer → validate
 ├── export/
-│   └── export_model.py    Python: train PINN + export TorchScript
-└── submit_aurora.sh       PBS job script for Aurora
+│   ├── export_model.py     Python: train PINN + export TorchScript
+│   └── validate_and_plot.py  Python: reference solution + error + plots
+└── submit_aurora.sh        PBS job script for Aurora
 ```
 
 ## License
